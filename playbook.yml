@@ -1,0 +1,128 @@
+- hosts: localhost
+  connection: local
+
+  vars:
+    pip_install_packages:
+      - name: docker
+
+  tasks:
+      
+    -   name: Check the version of release
+        command: hostnamectl
+        register: os_check
+        ignore_errors: yes
+
+    -   name: Install Role PIP
+        local_action: command ansible-galaxy install -f geerlingguy.pip 
+
+    -   name: Install Role Docker
+        local_action: command ansible-galaxy install -f geerlingguy.docker
+
+    -   name: Fetch Saleor Role
+        git:
+            repo: https://github.com/mirumee/saleor-platform.git
+            dest: /home/saleor
+            version: master
+            force: yes
+
+    -   name: Check if PIP is already installed
+        stat: path=/usr/bin/pip
+        register: pip_exists
+
+    -   name: Check if Docker is already installed
+        stat: path=/usr/bin/docker
+        register: docker_exists
+
+    -   name: Applying role PIP
+        command: mv ~/.ansible/roles/geerlingguy.pip ~/.ansible/roles/pwslab.pip
+        when: not pip_exists.stat.exists
+        ignore_errors: yes
+
+    -   name: Applying role Docker
+        command: mv ~/.ansible/roles/geerlingguy.docker ~/.ansible/roles/pwslab.docker
+        when: not docker_exists.stat.exists
+        ignore_errors: yes
+
+    -   name: Applying replacement on 20.04 or 8
+        lineinfile:
+            dest: ~/.ansible/roles/pwslab.pip/defaults/main.yml
+            regexp: '^pip_package: '
+            line: 'pip_package: python3-pip'
+            state: present
+        when:
+            - os_check.stdout | regex_search("CentOS Linux 8") or os_check.stdout | regex_search("Ubuntu 20.04")
+            - not pip_exists.stat.exists
+
+    -   name: Absent the Irrelevant files - Ubuntu 20
+        file:
+          path: /etc/apt/sources.list.d/ansible-ubuntu-ansible-focal.list
+          state: absent
+        when:
+          - os_check.stdout | regex_search("Ubuntu 20")
+
+    -   name: Installing PIP
+        include_role:
+            name: pwslab.pip
+        when: not pip_exists.stat.exists
+        
+    -   name: Installing Docker
+        include_role:
+            name: pwslab.docker
+        when: not docker_exists.stat.exists
+
+    -   name: install python-docker
+        package:
+            name: python-docker
+            state: present
+        when:
+            - os_check.stdout | regex_search("CentOS Linux 7") or os_check.stdout | regex_search("Ubuntu 18.04")
+
+    -   name: Build Saleor Docker Compose
+        shell: "{{ item }}"
+        loop:
+            - docker-compose build
+            - docker-compose run --rm api python3 manage.py migrate
+            - docker-compose run --rm api python3 manage.py collectstatic --noinput
+            - docker-compose run --rm api python3 manage.py populatedb
+        ignore_errors: yes
+        args:
+            chdir: /home/saleor
+
+    -   pause:
+            prompt: "Please provide your email address."
+            echo: yes
+        register: email_result
+
+    -   pause:
+            prompt: "Please enter new password"
+            echo: yes
+        register: password_result
+
+    -   pause:
+            prompt: "Please enter new password (again)" 
+            echo: yes
+        register: password_again_result
+
+    -   set_fact:
+                email_result: "{{ email_result.user_input }}"
+                password_result: "{{ password_result.user_input }}"
+                password_again_result: "{{ password_again_result.user_input }}"
+
+    -   debug:
+                var: hostname_result
+
+    -   name: Create a Super user
+        expect:
+            command: docker-compose -f /home/saleor/docker-compose.yml run --rm api python3 manage.py createsuperuser
+            responses:
+                'Email: ': "{{ email_result }}"
+                'Password:': "{{ password_result }}"
+                'Password \(again\):': "{{ password_again_result }}"
+
+    -   name: Docker Compose Saleor
+        shell: "{{ item }}"
+        loop:
+            - docker-compose up -d
+        ignore_errors: yes
+        args:
+            chdir: /home/saleor
